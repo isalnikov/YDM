@@ -1,6 +1,6 @@
 # YDM — Yandex Music Downloader
 
-Chrome-расширение (Manifest V3) для **личного** скачивания треков с [Яндекс.Музыки](https://music.yandex.ru). На страницах плейлистов, альбомов и в поиске рядом с треками появляется кнопка **⬇ Скачать**.
+Chrome-расширение (Manifest V3) для **личного** скачивания треков с [Яндекс.Музыки](https://music.yandex.ru). Рядом с каждым треком — две кнопки: быстрое скачивание и скачивание **с обложкой** в MP3.
 
 > ⚠️ Только для личного использования. Не для публикации в Chrome Web Store. Нужна подписка **Яндекс.Плюс** для полных треков. Использование может противоречить условиям сервиса Яндекс.Музыки — на ваш риск.
 
@@ -8,12 +8,13 @@ Chrome-расширение (Manifest V3) для **личного** скачив
 
 ## Возможности
 
-- Кнопки скачивания у треков (`.d-track` и fallback-селекторы)
-- OAuth API `api.music.yandex.net` (актуальный формат `download-info` / `get-file-info`)
-- Автосохранение токена из `#access_token=` в URL после авторизации
-- Прямое скачивание MP3 через `chrome.downloads` (без blob в Service Worker)
-- Конвертация M4A → MP3 через **ffmpeg.wasm** в Offscreen Document
-- Подробные логи с префиксом `[YM-EXT]` в консоли и Service Worker
+- Две кнопки у трека: **⬇ Скачать** (быстро) и **🖼 С обложкой** (ID3 + превью в проводнике)
+- OAuth API `api.music.yandex.net` (`download-info` / `get-file-info`)
+- Автосохранение токена из `#access_token=` в URL
+- **Быстрый режим:** MP3 скачивается напрямую по URL (как в v1.3.1)
+- **С обложкой:** обложка из строки трека (картинка у play) → ID3v2.3 **APIC** через `browser-id3-writer` (VLC, Nautilus/Ubuntu)
+- M4A → MP3 через **ffmpeg.wasm** (Offscreen), теги — через ID3Writer
+- Селекторы для классического `.d-track` и нового UI (`PlayButtonWithCover_coverImage`)
 
 ## Быстрый старт
 
@@ -28,132 +29,114 @@ cd YDM
 
 1. Откройте `chrome://extensions/`
 2. Включите **Режим разработчика**
-3. **Загрузить распакованное расширение** → выберите папку:
-
-   ```
-   YDM/yandex-music-downloader
-   ```
-
-4. В папке `yandex-music-downloader/lib/` уже должны быть файлы ffmpeg (~31 MB). Если их нет — см. раздел [Сборка lib/](#сборка-lib).
+3. **Загрузить распакованное расширение** → папка `YDM/yandex-music-downloader`
+4. В `lib/` должны быть `ffmpeg-core.*`, `ffmpeg.min.js`, `browser-id3-writer.mjs` (~31 MB). Если чего-то нет — см. [Сборка lib/](#сборка-lib)
 
 ### 3. OAuth-токен (обязательно)
 
-Старый API через cookies/handlers **больше не работает** (404). Нужен OAuth-токен:
+Cookies/handlers API **не работают**. Нужен OAuth-токен:
 
-1. Откройте popup расширения → **«Получить токен (OAuth)»**
-2. Войдите в Яндекс и разрешите доступ
-3. Скопируйте `access_token` из адресной строки (между `access_token=` и `&`)
-4. Вставьте в popup → **«Сохранить токен»**
+1. Popup расширения → **«Получить токен (OAuth)»**
+2. Войдите в Яндекс, скопируйте `access_token` из адресной строки
+3. Вставьте в popup → **«Сохранить токен»**
 
-Или откройте страницу вида:
+Или откройте `https://music.yandex.ru/#access_token=...` — токен сохранится сам.
 
-```
-https://music.yandex.ru/#access_token=...
-```
-
-Токен сохранится автоматически (v1.3+).
-
-Подробнее: [Получение токена — Yandex Music API](https://ym.marshal.dev/token/)
+Инструкция: https://ym.marshal.dev/token/
 
 ### 4. Скачивание
 
-1. Откройте плейлист или альбом на music.yandex.ru
-2. Нажмите **⬇ Скачать** у нужного трека
-3. Файл появится в папке загрузок: `YandexMusic/Исполнитель - Название.mp3`
+| Кнопка | Что делает |
+|--------|------------|
+| **⬇ Скачать** | Быстро: MP3 — прямая загрузка; M4A — конвертация без обложки |
+| **🖼 С обложкой** | Обложка + название/исполнитель в тегах; превью в файловом менеджере |
+
+Файлы: `YandexMusic/Исполнитель - Название.mp3`
 
 ## Структура репозитория
 
 ```
 YDM/
-├── README.md                 # этот файл
-├── TODO.md                   # ТЗ и промпт для разработки
-└── yandex-music-downloader/  # исходники расширения Chrome
+├── README.md
+├── TODO.md
+└── yandex-music-downloader/
     ├── manifest.json
-    ├── background.js         # Service Worker — API, скачивание
-    ├── content.js            # кнопки на странице
-    ├── page-bridge.js        # перехват OAuth (MAIN world)
+    ├── background.js       # API, скачивание, маршрутизация
+    ├── content.js          # кнопки, обложка со страницы
+    ├── page-bridge.js       # OAuth (MAIN world)
     ├── utils.js
-    ├── converter.html/js     # ffmpeg.wasm (Offscreen)
+    ├── converter.html
+    ├── converter.mjs         # ffmpeg + ID3Writer (ES module)
     ├── popup.html/js
-    ├── lib/                  # ffmpeg-core (~31 MB)
+    ├── lib/
+    │   ├── ffmpeg-core.*
+    │   ├── ffmpeg.min.js
+    │   └── browser-id3-writer.mjs
     └── icons/
 ```
 
 ## Как это работает
 
 ```mermaid
-sequenceDiagram
-    participant User
-    participant Page as music.yandex.ru
-    participant CS as content.js
-    participant SW as background.js
-    participant API as api.music.yandex.net
-    participant DL as chrome.downloads
-
-    User->>Page: Клик «Скачать»
-    Page->>CS: trackId + token
-    CS->>SW: DOWNLOAD_TRACK
-    SW->>API: /tracks/{id}/download-info
-    API-->>SW: downloadInfoUrl
-    SW->>API: meta XML / get-mp3
-    SW->>DL: прямой URL MP3
-    DL-->>User: файл в Downloads
+flowchart LR
+  A[Клик] --> B{Кнопка}
+  B -->|Скачать| C[MP3: прямой URL]
+  B -->|С обложкой| D[Обложка из DOM]
+  D --> E[ID3Writer APIC]
+  C --> F[Downloads]
+  E --> F
 ```
 
-1. **content.js** — находит треки, вставляет кнопки, передаёт OAuth-токен
-2. **background.js** — запросы к API, сборка прямой ссылки на MP3
-3. **chrome.downloads** — скачивание по HTTP URL (MP3)
-4. **converter** (Offscreen) — конвертация, если формат не MP3
+1. **content.js** — кнопки, URL обложки из `img` в строке трека
+2. **background.js** — API Яндекса, выбор быстрого или полного пути
+3. **converter.mjs** — ffmpeg только для M4A; APIC для Nautilus — **browser-id3-writer** (ID3v2.3)
+4. **chrome.downloads** — сохранение (прямой URL или blob из offscreen)
 
 ## Сборка lib/
 
-Если `lib/` пустая после клонирования (редко — файлы в git):
-
 ```bash
 cd yandex-music-downloader
-npm install @ffmpeg/ffmpeg@0.12.10 @ffmpeg/core@0.12.6
+npm install @ffmpeg/ffmpeg@0.12.10 @ffmpeg/core@0.12.6 browser-id3-writer@6.3.1
 cp node_modules/@ffmpeg/core/dist/umd/ffmpeg-core.js lib/
 cp node_modules/@ffmpeg/core/dist/umd/ffmpeg-core.wasm lib/
 cp node_modules/@ffmpeg/ffmpeg/dist/umd/ffmpeg.js lib/ffmpeg.min.js
 cp node_modules/@ffmpeg/ffmpeg/dist/umd/814.ffmpeg.js lib/
+cp node_modules/browser-id3-writer/dist/browser-id3-writer.mjs lib/
 ```
 
 ## Отладка
 
-Логи включены по умолчанию. Фильтр в консоли: `YM-EXT`
+Фильтр в консоли: `YM-EXT` (логируются только ключевые действия и ошибки).
 
 | Компонент | Где смотреть |
 |-----------|--------------|
-| Страница Яндекс.Музыки | F12 → Console |
-| Service Worker | `chrome://extensions` → «Service Worker» |
-| Offscreen (ffmpeg) | `chrome://extensions` → offscreen |
-
-### Типичные ошибки
+| Страница | F12 → Console |
+| Service Worker | `chrome://extensions` → Service Worker |
+| Offscreen | `chrome://extensions` → offscreen |
 
 | Сообщение | Решение |
 |-----------|---------|
 | `OAuth-токен не найден` | Сохраните токен в popup |
-| `available=false` | Трек недоступен — выберите другой |
-| `no-rights` | Нет прав / подписка / регион |
-| `URL.createObjectURL is not a function` | Обновите до v1.3.1+ |
+| `Обложка не найдена` | Используйте **🖼 С обложкой** только если в строке видна картинка |
+| `available=false` | Трек недоступен / нет Плюс |
 
 ## Ограничения
 
-- Только **ручное** скачивание по клику (не массовое)
+- Только ручное скачивание по клику
 - **Яндекс.Плюс** для полных треков
-- **DRM / HLS** не поддерживаются
-- Папка сохранения — только через настройки Chrome (`chrome://settings/downloads`)
-- Яндекс может менять API и вёрстку — потребуется обновление селекторов
+- DRM / HLS не поддерживаются
+- Обложка в проводнике — только через **🖼 С обложкой**
+- Яндекс может менять API и вёрстку
 
 ## Версия
 
-Текущая версия расширения: **1.3.1** (см. `yandex-music-downloader/manifest.json`).
+**1.7.1** — см. `yandex-music-downloader/manifest.json`
 
-## Лицензия и ответственность
+## Лицензия
 
-Проект предназначен для личного архивирования музыки, на которую у вас есть права по подписке. Авторы не поощряют нарушение авторских прав и условий использования Яндекс.Музыки. Не распространяйте скачанные файлы.
+Для личного архивирования при действующей подписке. Не распространяйте скачанные файлы.
 
 ## См. также
 
-- [README расширения](yandex-music-downloader/README.md) — детали по файлам
-- [TODO.md](TODO.md) — исходное техническое задание
+- [README расширения](yandex-music-downloader/README.md)
+- [TODO.md](TODO.md)
