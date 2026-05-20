@@ -531,66 +531,94 @@ async function fetchAudioBuffer(url) {
   return { buffer, mime };
 }
 
-async function convertInOffscreen(buffer, inputExt) {
-  log('log', 'конвертация в MP3…');
-  await ensureOffscreenDocument();
-  const requestId = crypto.randomUUID();
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      chrome.runtime.onMessage.removeListener(listener);
-      reject(new Error('Таймаут конвертации (120 с)'));
-    }, 120000);
-    function listener(message) {
-      if (message?.type !== 'CONVERT_RESULT' || message.requestId !== requestId) return;
-      clearTimeout(timeout);
-      chrome.runtime.onMessage.removeListener(listener);
-      if (message.ok) resolve({ buffer: message.buffer, ext: message.ext || 'mp3' });
-      else reject(new Error(message.error || 'Ошибка конвертации'));
+/**
+ * URL обложки из coverUri Яндекс.Музыки.
+ * @param {string} coverUri
+ * @param {number} size
+ * @returns {string|null}
+ */
+function buildCoverUrl(coverUri, size = 400) {
+  if (!coverUri) return null;
+  let uri = String(coverUri).trim();
+  if (uri.startsWith('http://') || uri.startsWith('https://')) {
+    return uri.includes('%%') ? uri.replace('%%', `${size}x${size}`) : uri;
+  }
+  if (uri.startsWith('//')) uri = `https:${uri}`;
+  else if (!uri.startsWith('http')) uri = `https://${uri}`;
+  return uri.includes('%%') ? uri.replace('%%', `${size}x${size}`) : uri;
+}
+
+/**
+ * @param {object|null} track
+ * @returns {Promise<ArrayBuffer|null>}
+ */
+async function fetchCoverBuffer(track) {
+  const album = track?.albums?.[0];
+  const coverUri = track?.coverUri || album?.coverUri || track?.ogImage;
+  const url = buildCoverUrl(coverUri);
+  if (!url) {
+    log('warn', 'обложка: coverUri отсутствует в метаданных трека');
+    return null;
+  }
+  log('log', 'загрузка обложки', url.slice(0, 90));
+  try {
+    const res = await fetch(url);
+    if (!res.ok) {
+      log('warn', 'обложка: HTTP', res.status);
+      return null;
     }
-    chrome.runtime.onMessage.addListener(listener);
-    chrome.runtime.sendMessage({
-      type: 'CONVERT_AUDIO',
-      target: 'offscreen',
-      requestId,
-      buffer,
-      inputExt
-    }).catch(reject);
-  });
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength < 100) {
+      log('warn', 'обложка: слишком маленький файл');
+      return null;
+    }
+    log('log', 'обложка загружена', Math.round(buf.byteLength / 1024) + ' KB');
+    return buf;
+  } catch (e) {
+    log('warn', 'обложка не загружена', e);
+    return null;
+  }
 }
 
 /**
- * Прямое скачивание по HTTP(S) — работает в Service Worker (без createObjectURL).
- * @param {string} fileUrl
+ * ID3-метаданные для ffmpeg.
+ * @param {object|null} track
+ * @param {string} fallbackTitle
+ * @param {string} fallbackArtist
+ */
+function extractId3Meta(track, fallbackTitle, fallbackArtist) {
+  const album = track?.albums?.[0];
+  return {
+    title: track?.title || fallbackTitle || '',
+    artist: track?.artists?.map((a) => a.name).join(', ') || fallbackArtist || '',
+    album: album?.title || '',
+    year: album?.year ? String(album.year) : ''
+  };
+}
+
+/**
+ * MP3 + ID3 + обложка через offscreen/ffmpeg, затем chrome.downloads.
+ * @param {ArrayBuffer} audioBuffer
+ * @param {string} inputExt
+ * @param {ArrayBuffer|null} coverBuffer
+ * @param {{ title: string, artist: string, album: string, year: string }} meta
  * @param {string} filename
  */
-async function downloadDirectUrl(fileUrl, filename) {
-  log('log', 'chrome.downloads по URL', filename, fileUrl.slice(0, 90) + '…');
-  const downloadId = await chrome.downloads.download({
-    url: fileUrl,
+async function saveDownloadWithId3(audioBuffer, inputExt, coverBuffer, meta, filename) {
+  log('log', 'обработка MP3 + ID3', {
     filename,
-    conflictAction: 'uniquify',
-    saveAs: false
+    inputExt,
+    hasCover: Boolean(coverBuffer),
+    title: meta.title
   });
-  log('log', 'chrome.downloads id', downloadId);
-  return downloadId;
-}
-
-/**
- * Сохранение ArrayBuffer через Offscreen (там есть URL.createObjectURL).
- * @param {ArrayBuffer} buffer
- * @param {string} filename
- * @param {string} mime
- */
-async function saveDownloadBuffer(buffer, filename, mime) {
-  log('log', 'сохранение через offscreen', filename, Math.round(buffer.byteLength / 1024) + ' KB');
   await ensureOffscreenDocument();
   const requestId = crypto.randomUUID();
 
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       chrome.runtime.onMessage.removeListener(listener);
-      reject(new Error('Таймаут сохранения файла'));
-    }, 60_000);
+      reject(new Error('Таймаут обработки аудио (180 с)'));
+    }, 180_000);
 
     function listener(message) {
       if (message?.type !== 'DOWNLOAD_SAVED' || message.requestId !== requestId) return;
@@ -603,12 +631,14 @@ async function saveDownloadBuffer(buffer, filename, mime) {
     chrome.runtime.onMessage.addListener(listener);
     chrome.runtime
       .sendMessage({
-        type: 'SAVE_DOWNLOAD',
+        type: 'PROCESS_AUDIO',
         target: 'offscreen',
         requestId,
-        buffer,
-        filename,
-        mime
+        buffer: audioBuffer,
+        inputExt,
+        coverBuffer,
+        meta,
+        filename
       })
       .catch((err) => {
         clearTimeout(timeout);
@@ -692,41 +722,18 @@ async function downloadTrack({ trackId, title, artist, token }) {
 
   const { url, codec } = await resolveTrackUrl(trackId, oauth);
   const baseName = sanitizeFilename(`${resolvedArtist} - ${resolvedTitle}`);
-  const isMp3 =
-    codec === 'mp3' || /\/get-mp3\//i.test(url) || /\.mp3(\?|$)/i.test(url);
+  const filename = `YandexMusic/${baseName}.mp3`;
 
-  if (isMp3) {
-    const filename = `YandexMusic/${baseName}.mp3`;
-    await downloadDirectUrl(url, filename);
-    log('info', '═══ трек скачан (прямой URL) ═══', filename);
-    return { ok: true, filename };
-  }
-
-  log('log', 'не MP3 — загрузка и конвертация', codec);
   const { buffer, mime } = await fetchAudioBuffer(url);
-  const inputExt = mime.includes('mpeg') ? 'mp3' : 'm4a';
+  const inputExt =
+    codec === 'mp3' || mime.includes('mpeg') || /\/get-mp3\//i.test(url) ? 'mp3' : 'm4a';
 
-  let outBuffer = buffer;
-  let outExt = inputExt;
-  let outMime = mime;
+  const coverBuffer = await fetchCoverBuffer(track);
+  const meta = extractId3Meta(track, resolvedTitle, resolvedArtist);
 
-  if (inputExt !== 'mp3') {
-    try {
-      const converted = await convertInOffscreen(buffer, inputExt);
-      outBuffer = converted.buffer;
-      outExt = 'mp3';
-      outMime = 'audio/mpeg';
-      log('log', 'конвертация OK');
-    } catch (e) {
-      log('warn', 'конвертация не удалась, исходный формат', e);
-      outExt = inputExt;
-    }
-  }
+  await saveDownloadWithId3(buffer, inputExt, coverBuffer, meta, filename);
 
-  const filename = `YandexMusic/${baseName}.${outExt}`;
-  await saveDownloadBuffer(outBuffer, filename, outMime);
-
-  log('info', '═══ трек скачан (buffer) ═══', filename);
+  log('info', '═══ трек скачан (с ID3 и обложкой) ═══', filename);
   return { ok: true, filename };
 }
 

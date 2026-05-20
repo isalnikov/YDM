@@ -19,8 +19,9 @@
 1. **Content script** (`content.js`) находит треки в DOM, вставляет кнопки, читает OAuth-токен из `localStorage` страницы.
 2. По клику отправляет сообщение в **Service Worker** (`background.js`).
 3. SW запрашивает `api.music.yandex.net` → `download-info` → XML → прямая ссылка на аудио.
-4. SW скачивает файл и при необходимости передаёт в **Offscreen Document** (`converter.html`) для конвертации в MP3 через **ffmpeg.wasm** (локально, без CDN).
-5. Готовый файл сохраняется через `chrome.downloads` в папку загрузок Chrome (`YandexMusic/Исполнитель - Название.mp3`).
+4. SW скачивает аудио в память, загружает обложку с `avatars.yandex.net` по `coverUri` из API трека.
+5. **Offscreen Document** (`converter.html`) через **ffmpeg.wasm** собирает MP3 с **ID3-тегами** (title, artist, album) и встроенной обложкой (**APIC** / `attached_pic`).
+6. Готовый файл сохраняется через `chrome.downloads` (`YandexMusic/Исполнитель - Название.mp3`).
 
 ## Структура
 
@@ -65,6 +66,7 @@ cp node_modules/@ffmpeg/ffmpeg/dist/umd/814.ffmpeg.js lib/
 - [ ] Кнопки появляются на плейлисте и при прокрутке
 - [ ] Клик → файл в Downloads
 - [ ] Имя файла: `Исполнитель - Название.mp3`
+- [ ] В плеере/проводнике видна обложка альбома (ID3 APIC)
 - [ ] Без авторизации — сообщение о токене
 - [ ] При ошибке ffmpeg — сохраняется исходный M4A/MP3
 
