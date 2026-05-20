@@ -736,8 +736,8 @@ async function resolveToken(token) {
   return null;
 }
 
-async function downloadTrack({ trackId, title, artist, coverUrl, coverB64, token }) {
-  log('info', 'скачивание', trackId, title);
+async function downloadTrack({ trackId, title, artist, coverUrl, coverB64, withCover, token }) {
+  log('info', withCover ? 'скачивание с обложкой' : 'скачивание', trackId, title);
 
   const oauth = await resolveToken(token);
   if (!oauth) {
@@ -776,13 +776,21 @@ async function downloadTrack({ trackId, title, artist, coverUrl, coverB64, token
   const filename = `YandexMusic/${baseName}.mp3`;
   const albumTitle = track?.albums?.[0]?.title || '';
   const id3Meta = { title: resolvedTitle, artist: resolvedArtist, album: albumTitle };
-  const coverBuffer = await resolveCoverBuffer(coverUrl, coverB64, track);
-  if (coverBuffer) log('info', 'скачивание обложки', trackId);
+  let coverBuffer = null;
+  if (withCover) {
+    coverBuffer = await resolveCoverBuffer(coverUrl, coverB64, track);
+    if (coverBuffer) log('info', 'скачивание обложки', trackId);
+    if (!coverBuffer) {
+      throw new Error(
+        'Обложка не найдена. В строке трека должна быть видна картинка альбома (под кнопкой play).'
+      );
+    }
+  }
 
   const isMp3Stream =
     codec === 'mp3' || /\/get-mp3\//i.test(url) || /\.mp3(\?|$)/i.test(url);
 
-  if (isMp3Stream && !coverBuffer) {
+  if (!withCover && isMp3Stream) {
     await downloadDirectUrl(url, filename);
     log('info', 'готово', filename);
     return { ok: true, filename };
@@ -802,9 +810,14 @@ async function downloadTrack({ trackId, title, artist, coverUrl, coverB64, token
     if (isMp3Stream) {
       log('info', 'теги MP3', trackId);
       result = await callOffscreen('TAG_MP3', payload);
-    } else {
+    } else if (withCover) {
       log('info', 'конвертация', trackId);
       result = await callOffscreen('CONVERT_AND_TAG', payload);
+    } else {
+      log('info', 'конвертация', trackId);
+      result = await callOffscreen('CONVERT_M4A', {
+        bufferB64: payload.bufferB64
+      });
     }
     await downloadBlobUrl(result.blobUrl, filename);
     log('info', 'готово', filename);

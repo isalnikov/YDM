@@ -6,6 +6,7 @@
 
   const U = globalThis.YMUtils;
   const BUTTON_CLASS = 'ym-ext-download-btn';
+  const BUTTON_CLASS_COVER = 'ym-ext-download-cover-btn';
   const ROW_ATTR = 'data-ym-ext-row';
   const MAX_CONCURRENT = 1;
   let activeDownloads = 0;
@@ -57,7 +58,39 @@
       .${BUTTON_CLASS}:disabled { opacity: 0.7; cursor: wait; }
       .${BUTTON_CLASS}[data-status="done"] { background: #4ade80 !important; color: #052e16 !important; }
       .${BUTTON_CLASS}[data-status="error"] { background: #f87171 !important; color: #450a0a !important; }
-      .d-track__actions .${BUTTON_CLASS}, .d-track__col .${BUTTON_CLASS} { margin-right: 4px; }
+      .${BUTTON_CLASS_COVER} {
+        display: inline-flex !important;
+        visibility: visible !important;
+        opacity: 1 !important;
+        align-items: center;
+        justify-content: center;
+        margin-left: 4px;
+        padding: 5px 10px;
+        min-width: 72px;
+        font-size: 10px;
+        font-weight: 600;
+        font-family: inherit;
+        line-height: 1.2;
+        border: none;
+        border-radius: 100px;
+        cursor: pointer;
+        z-index: 9999 !important;
+        pointer-events: auto !important;
+        background: #60a5fa !important;
+        color: #0f172a !important;
+        box-shadow: 0 1px 4px rgba(0,0,0,.2);
+        flex-shrink: 0;
+        vertical-align: middle;
+      }
+      .${BUTTON_CLASS_COVER}:hover:not(:disabled) { filter: brightness(1.05); }
+      .${BUTTON_CLASS_COVER}:disabled { opacity: 0.7; cursor: wait; }
+      .${BUTTON_CLASS_COVER}[data-status="done"] { background: #4ade80 !important; color: #052e16 !important; }
+      .${BUTTON_CLASS_COVER}[data-status="error"] { background: #f87171 !important; color: #450a0a !important; }
+      .d-track__actions .${BUTTON_CLASS},
+      .d-track__actions .${BUTTON_CLASS_COVER},
+      .d-track__col .${BUTTON_CLASS},
+      .d-track__col .${BUTTON_CLASS_COVER} { margin-right: 4px; }
+      .ym-ext-download-wrap { display: inline-flex; align-items: center; flex-wrap: nowrap; gap: 0; }
     `;
     (document.head || document.documentElement).appendChild(style);
     log('log', 'стили кнопок добавлены');
@@ -299,13 +332,27 @@
   }
 
   /**
+   * @param {string} trackId
+   */
+  function setTrackButtonsDisabled(trackId, disabled) {
+    document
+      .querySelectorAll(
+        `.${BUTTON_CLASS}[data-track-id="${trackId}"], .${BUTTON_CLASS_COVER}[data-track-id="${trackId}"]`
+      )
+      .forEach((el) => {
+        /** @type {HTMLButtonElement} */ (el).disabled = disabled;
+      });
+  }
+
+  /**
    * @param {{ trackId: string, title: string, artist: string }} meta
    * @param {HTMLButtonElement} btn
+   * @param {boolean} withCover
    */
-  async function handleDownloadClick(btn, meta) {
+  async function handleDownloadClick(btn, meta, withCover) {
     if (btn.dataset.status === 'downloading' || activeDownloads >= MAX_CONCURRENT) return;
 
-    log('info', 'клик «Скачать»', meta.trackId, meta.title);
+    log('info', withCover ? 'клик «С обложкой»' : 'клик «Скачать»', meta.trackId, meta.title);
 
     const token = await U.getAccessToken();
     if (!token) {
@@ -318,20 +365,27 @@
 
     activeDownloads++;
     setButtonState(btn, 'downloading', 'Загрузка...');
+    setTrackButtonsDisabled(meta.trackId, true);
 
     try {
-      const row = findRowForButton(btn);
-      const coverUrl = extractCoverUrl(row) || meta.coverUrl;
-      const coverB64 = await fetchCoverB64(coverUrl);
-      if (coverB64) log('info', 'скачивание обложки', meta.trackId);
+      let coverUrl = null;
+      let coverB64 = null;
+      if (withCover) {
+        const row = findRowForButton(btn);
+        coverUrl = extractCoverUrl(row) || meta.coverUrl;
+        coverB64 = await fetchCoverB64(coverUrl);
+        if (coverB64) log('info', 'скачивание обложки', meta.trackId);
+      }
+
       const host = window.location.hostname;
       const response = await chrome.runtime.sendMessage({
         type: 'DOWNLOAD_TRACK',
         trackId: meta.trackId,
         title: meta.title,
         artist: meta.artist,
-        coverUrl: coverUrl || null,
-        coverB64: coverB64 || null,
+        withCover,
+        coverUrl: withCover ? coverUrl : null,
+        coverB64: withCover ? coverB64 : null,
         token: token || null,
         musicHost: host
       });
@@ -355,16 +409,24 @@
       alert('Ошибка расширения. Перезагрузите его на chrome://extensions');
     } finally {
       activeDownloads--;
+      setTrackButtonsDisabled(meta.trackId, false);
     }
   }
 
   /**
    * @param {Element} container
-   * @param {{ trackId: string, title: string, artist: string }} meta
+   * @param {{ trackId: string, title: string, artist: string, coverUrl?: string|null }} meta
    */
   function mountButton(container, meta) {
-    const existing = container.querySelector(`.${BUTTON_CLASS}[data-track-id="${meta.trackId}"]`);
-    if (existing) return false;
+    if (
+      container.querySelector(`.${BUTTON_CLASS}[data-track-id="${meta.trackId}"]`) &&
+      container.querySelector(`.${BUTTON_CLASS_COVER}[data-track-id="${meta.trackId}"]`)
+    ) {
+      return false;
+    }
+
+    const wrap = document.createElement('span');
+    wrap.className = 'ym-ext-download-wrap';
 
     const btn = document.createElement('button');
     btn.type = 'button';
@@ -376,8 +438,23 @@
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       e.preventDefault();
-      handleDownloadClick(btn, meta);
+      handleDownloadClick(btn, meta, false);
     });
+
+    const btnCover = document.createElement('button');
+    btnCover.type = 'button';
+    btnCover.className = BUTTON_CLASS_COVER;
+    btnCover.textContent = '🖼 С обложкой';
+    btnCover.dataset.trackId = meta.trackId;
+    btnCover.dataset.status = 'idle';
+    btnCover.title = `Скачать с обложкой: ${meta.artist} — ${meta.title}`;
+    btnCover.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      handleDownloadClick(btnCover, meta, true);
+    });
+
+    wrap.append(btn, btnCover);
 
     const actions =
       container.querySelector('.d-track__actions') ||
@@ -385,12 +462,11 @@
       container.querySelector('.d-track__col');
 
     if (actions) {
-      actions.prepend(btn);
+      actions.prepend(wrap);
     } else {
-      container.appendChild(btn);
+      container.appendChild(wrap);
     }
 
-    log('log', 'добавлена кнопка', meta.trackId, meta.title);
     return true;
   }
 
@@ -400,7 +476,11 @@
   function processDTrack(trackEl) {
     if (trackEl.getAttribute(ROW_ATTR) === '1') {
       const meta = extractMetaFromDTrack(trackEl);
-      if (meta && !trackEl.querySelector(`.${BUTTON_CLASS}[data-track-id="${meta.trackId}"]`)) {
+      if (
+        meta &&
+        (!trackEl.querySelector(`.${BUTTON_CLASS}[data-track-id="${meta.trackId}"]`) ||
+          !trackEl.querySelector(`.${BUTTON_CLASS_COVER}[data-track-id="${meta.trackId}"]`))
+      ) {
         trackEl.removeAttribute(ROW_ATTR);
       } else {
         return;
@@ -433,7 +513,12 @@
 
       const meta = extractMeta(row);
       if (!meta) return;
-      if (row.querySelector(`.${BUTTON_CLASS}[data-track-id="${meta.trackId}"]`)) return;
+      if (
+        row.querySelector(`.${BUTTON_CLASS}[data-track-id="${meta.trackId}"]`) &&
+        row.querySelector(`.${BUTTON_CLASS_COVER}[data-track-id="${meta.trackId}"]`)
+      ) {
+        return;
+      }
 
       log('log', 'найден трек (ссылка)', meta.trackId);
       mountButton(row, meta);
@@ -457,7 +542,12 @@
       if (row.classList.contains('d-track')) return;
       const meta = extractMeta(row);
       if (!meta) return;
-      if (row.querySelector(`.${BUTTON_CLASS}[data-track-id="${meta.trackId}"]`)) return;
+      if (
+        row.querySelector(`.${BUTTON_CLASS}[data-track-id="${meta.trackId}"]`) &&
+        row.querySelector(`.${BUTTON_CLASS_COVER}[data-track-id="${meta.trackId}"]`)
+      ) {
+        return;
+      }
       log('log', 'найден трек (modern UI)', meta.trackId);
       mountButton(row, meta);
     });
@@ -483,11 +573,13 @@
   async function markDownloadedTracks() {
     const { downloadedTracks = [] } = await chrome.storage.local.get('downloadedTracks');
     const set = new Set(downloadedTracks);
-    document.querySelectorAll(`.${BUTTON_CLASS}`).forEach((btn) => {
-      if (set.has(btn.dataset.trackId)) {
-        setButtonState(/** @type {HTMLButtonElement} */ (btn), 'done', '✓ Скачан');
-      }
-    });
+    document
+      .querySelectorAll(`.${BUTTON_CLASS}, .${BUTTON_CLASS_COVER}`)
+      .forEach((btn) => {
+        if (set.has(btn.dataset.trackId)) {
+          setButtonState(/** @type {HTMLButtonElement} */ (btn), 'done', '✓ Скачан');
+        }
+      });
   }
 
   /** Автосохранение токена из #access_token= в URL */
