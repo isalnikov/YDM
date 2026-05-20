@@ -73,6 +73,42 @@
   }
 
   /**
+   * URL обложки из строки трека на странице (рядом с кнопкой play).
+   * @param {Element} row
+   * @returns {string|null}
+   */
+  function extractCoverUrl(row) {
+    const imgSelectors = [
+      '.d-track__cover img',
+      '.d-track__img img',
+      'img[class*="cover" i]',
+      'img[src*="avatars.yandex"]',
+      'img[src*="avatars.mds"]'
+    ];
+    for (const sel of imgSelectors) {
+      const img = row.querySelector(sel);
+      const src = img?.currentSrc || img?.src;
+      if (src && !src.startsWith('data:')) return src;
+    }
+
+    const playBtn =
+      row.querySelector('.d-track__play') ||
+      row.querySelector('button[class*="play" i]') ||
+      row.querySelector('[class*="PlayButton"]') ||
+      row.querySelector('[aria-label*="слушать" i]');
+    if (playBtn) {
+      const block = playBtn.closest('[class*="cover" i]') || playBtn.parentElement?.parentElement || row;
+      const img = block.querySelector('img[src]');
+      const src = img?.currentSrc || img?.src;
+      if (src && !src.startsWith('data:')) return src;
+    }
+
+    const any = row.querySelector('img[src*="avatar"], img[src*="covers"]');
+    const src = any?.currentSrc || any?.src;
+    return src && !src.startsWith('data:') ? src : null;
+  }
+
+  /**
    * @param {Element} trackEl
    */
   function extractMetaFromDTrack(trackEl) {
@@ -88,8 +124,9 @@
 
     const title = (titleEl?.textContent || 'Без названия').trim().split('\n')[0];
     const artist = (artistEl?.textContent || 'Неизвестный исполнитель').trim().split('\n')[0];
+    const coverUrl = extractCoverUrl(trackEl);
 
-    return { trackId: String(trackId), title, artist };
+    return { trackId: String(trackId), title, artist, coverUrl };
   }
 
   /**
@@ -113,16 +150,19 @@
     const artist =
       row.querySelector('[class*="artist"]')?.textContent || 'Неизвестный исполнитель';
 
+    const coverUrl = extractCoverUrl(row);
+
     return {
       trackId: String(trackId),
       title: title.trim().split('\n')[0],
-      artist: artist.trim().split('\n')[0]
+      artist: artist.trim().split('\n')[0],
+      coverUrl
     };
   }
 
   /**
    * @param {Element} el
-   * @returns {{ trackId: string, title: string, artist: string }|null}
+   * @returns {{ trackId: string, title: string, artist: string, coverUrl: string|null }|null}
    */
   function extractMeta(el) {
     if (el.classList?.contains('d-track')) return extractMetaFromDTrack(el);
@@ -172,6 +212,7 @@
         trackId: meta.trackId,
         title: meta.title,
         artist: meta.artist,
+        coverUrl: meta.coverUrl || null,
         token: token || null,
         musicHost: host
       });
