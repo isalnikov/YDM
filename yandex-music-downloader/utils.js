@@ -11,8 +11,12 @@ let cachedOAuthToken = null;
  * @param {...unknown} details
  */
 function LOG(level, action, ...details) {
+  const key =
+    /клик|скачивание|обложк|готово/i.test(action) || level === 'error' || level === 'warn';
+  if (!key) return;
   const msg = details.length ? [action, ...details] : [action];
-  console[level]('[YM-EXT]', ...msg);
+  const fn = level === 'info' ? console.info : console[level];
+  fn('[YM-EXT]', ...msg);
 }
 
 /**
@@ -230,10 +234,24 @@ function initBridgeListener() {
   });
 }
 
+/**
+ * Увеличивает превью avatars.yandex.net (100x100 → 400x400).
+ * @param {string|null|undefined} url
+ */
+function normalizeCoverUrl(url) {
+  if (!url) return null;
+  let u = String(url).trim();
+  if (u.startsWith('//')) u = `https:${u}`;
+  u = u.replace(/%%/g, '400x400');
+  u = u.replace(/\/(\d+)x(\d+)(?=$|[?#])/i, '/400x400');
+  return u;
+}
+
 globalThis.YMUtils = {
   LOG,
   debounce,
   sanitizeFilename,
+  normalizeCoverUrl,
   trackIdFromHref,
   extractAccessTokenFromStorage,
   getAccessToken,

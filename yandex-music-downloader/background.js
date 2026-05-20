@@ -13,13 +13,20 @@ const OAUTH_CLIENT_ID = '23cabbbdc6cd418abb4b39c32c41195d';
 let offscreenCreating = false;
 
 /**
+ * Только ключевые события + warn/error.
  * @param {'log'|'warn'|'error'|'info'} level
  * @param {string} action
  * @param {...unknown} details
  */
 function log(level, action, ...details) {
+  const key =
+    /скачивание|обложк|конвертац|теги|готово|нажат|клик/i.test(action) ||
+    level === 'error' ||
+    level === 'warn';
+  if (!key) return;
   const msg = details.length ? [action, ...details] : [action];
-  console[level]('[YM-EXT SW]', ...msg);
+  const fn = level === 'info' ? console.info : console[level];
+  fn('[YM-EXT SW]', ...msg);
 }
 
 function sanitizeFilename(name) {
@@ -62,26 +69,85 @@ function base64ToArrayBuffer(b64) {
 }
 
 /**
- * Обложка со страницы (img в строке трека).
+ * @param {string} coverUri
+ * @param {number} size
+ */
+function buildCoverUrlFromApi(coverUri, size = 400) {
+  if (!coverUri) return null;
+  let uri = String(coverUri).trim();
+  if (uri.startsWith('http://') || uri.startsWith('https://')) {
+    return uri.includes('%%') ? uri.replace('%%', `${size}x${size}`) : uri;
+  }
+  if (uri.startsWith('//')) uri = `https:${uri}`;
+  else if (!uri.startsWith('http')) uri = `https://${uri}`;
+  return uri.includes('%%') ? uri.replace('%%', `${size}x${size}`) : uri;
+}
+
+/**
+ * @param {string|null|undefined} url
+ */
+function normalizeCoverUrl(url) {
+  if (!url) return null;
+  let u = String(url).trim();
+  if (u.startsWith('//')) u = `https:${u}`;
+  u = u.replace(/%%/g, '400x400');
+  u = u.replace(/\/(\d+)x(\d+)(?=$|[?#])/i, '/400x400');
+  return u;
+}
+
+/**
  * @param {string|null|undefined} coverUrl
  */
-async function fetchCoverFromPage(coverUrl) {
-  if (!coverUrl) return null;
-  log('log', 'обложка со страницы', coverUrl.slice(0, 90));
+async function fetchCoverFromUrl(coverUrl) {
+  const url = normalizeCoverUrl(coverUrl);
+  if (!url) return null;
   try {
-    const res = await fetch(coverUrl);
+    const res = await fetch(url);
     if (!res.ok) {
       log('warn', 'обложка HTTP', res.status);
       return null;
     }
     const buf = await res.arrayBuffer();
     if (buf.byteLength < 50) return null;
-    log('log', 'обложка загружена', Math.round(buf.byteLength / 1024) + ' KB');
     return buf;
   } catch (e) {
     log('warn', 'обложка не загружена', e);
     return null;
   }
+}
+
+/**
+ * @param {object|null} track
+ */
+async function fetchCoverFromApi(track) {
+  const album = track?.albums?.[0];
+  const coverUri = track?.coverUri || album?.coverUri || track?.ogImage;
+  const url = buildCoverUrlFromApi(coverUri);
+  if (!url) {
+    log('warn', 'обложка: coverUri в API нет');
+    return null;
+  }
+  return fetchCoverFromUrl(url);
+}
+
+/**
+ * Обложка: content (base64) → URL со страницы → API трека.
+ * @param {string|null|undefined} coverUrl
+ * @param {string|null|undefined} coverB64
+ * @param {object|null} track
+ */
+async function resolveCoverBuffer(coverUrl, coverB64, track) {
+  if (coverB64) {
+    try {
+      const buf = base64ToArrayBuffer(coverB64);
+      if (buf.byteLength > 50) return buf;
+    } catch (e) {
+      log('warn', 'обложка base64 из content битая', e);
+    }
+  }
+  let buf = await fetchCoverFromUrl(coverUrl);
+  if (!buf) buf = await fetchCoverFromApi(track);
+  return buf;
 }
 
 /** MD5 для подписи URL (как в веб-клиенте Яндекс.Музыки). */
@@ -575,67 +641,61 @@ async function resolveTrackUrl(trackId, token) {
 }
 
 async function fetchAudioBuffer(url) {
-  log('log', 'скачивание аудио…', url.slice(0, 100));
   const res = await fetch(url, { credentials: 'include' });
-  log('log', 'аудио ответ', res.status, res.headers.get('content-type'));
   if (!res.ok) throw new Error(`Загрузка аудио: ${res.status}`);
   const mime = res.headers.get('content-type') || 'audio/mpeg';
   const buffer = await res.arrayBuffer();
-  log('log', 'аудио получено', Math.round(buffer.byteLength / 1024) + ' KB');
   return { buffer, mime };
 }
 
 /**
- * @param {ArrayBuffer} buffer
- * @param {string} inputExt
- * @param {{ title: string, artist: string, album?: string }} meta
- * @param {ArrayBuffer|null} coverBuffer
+ * @param {string} type
+ * @param {Record<string, unknown>} payload
+ * @param {number} [timeoutMs]
  */
-async function convertInOffscreen(buffer, inputExt, meta, coverBuffer) {
-  log('log', 'конвертация в MP3…', { hasCover: Boolean(coverBuffer) });
+async function callOffscreen(type, payload, timeoutMs = 180_000) {
   await ensureOffscreenDocument();
   const requestId = crypto.randomUUID();
-  const payload = {
-    type: 'CONVERT_AUDIO',
-    target: 'offscreen',
-    requestId,
-    buffer,
-    inputExt,
-    meta: {
-      title: meta.title || '',
-      artist: meta.artist || '',
-      album: meta.album || ''
-    }
-  };
-  if (coverBuffer && coverBuffer.byteLength > 0) {
-    payload.coverB64 = await arrayBufferToBase64(coverBuffer);
-  }
-
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       chrome.runtime.onMessage.removeListener(listener);
-      reject(new Error('Таймаут конвертации (120 с)'));
-    }, 120000);
+      reject(new Error('Таймаут обработки аудио'));
+    }, timeoutMs);
     function listener(message) {
-      if (message?.type !== 'CONVERT_RESULT' || message.requestId !== requestId) return;
+      if (message?.type !== 'OFFSCREEN_RESULT' || message.requestId !== requestId) return;
       clearTimeout(timeout);
       chrome.runtime.onMessage.removeListener(listener);
-      if (!message.ok) {
-        reject(new Error(message.error || 'Ошибка конвертации'));
-        return;
-      }
-      const outBuffer = message.outputB64
-        ? base64ToArrayBuffer(message.outputB64)
-        : message.buffer;
-      if (!outBuffer) {
-        reject(new Error('Пустой результат конвертации'));
-        return;
-      }
-      resolve({ buffer: outBuffer, ext: message.ext || 'mp3' });
+      if (message.ok) resolve(message);
+      else reject(new Error(message.error || 'Ошибка offscreen'));
     }
     chrome.runtime.onMessage.addListener(listener);
-    chrome.runtime.sendMessage(payload).catch(reject);
+    chrome.runtime
+      .sendMessage({ target: 'offscreen', type, requestId, ...payload })
+      .catch((err) => {
+        clearTimeout(timeout);
+        chrome.runtime.onMessage.removeListener(listener);
+        reject(err);
+      });
   });
+}
+
+/**
+ * @param {string} blobUrl
+ * @param {string} filename
+ */
+async function downloadBlobUrl(blobUrl, filename) {
+  const downloadId = await chrome.downloads.download({
+    url: blobUrl,
+    filename,
+    conflictAction: 'uniquify',
+    saveAs: false
+  });
+  setTimeout(() => {
+    chrome.runtime
+      .sendMessage({ target: 'offscreen', type: 'REVOKE_BLOB', requestId: 'x', blobUrl })
+      .catch(() => {});
+  }, 120_000);
+  return downloadId;
 }
 
 /**
@@ -644,39 +704,16 @@ async function convertInOffscreen(buffer, inputExt, meta, coverBuffer) {
  * @param {string} filename
  */
 async function downloadDirectUrl(fileUrl, filename) {
-  log('log', 'chrome.downloads по URL', filename, fileUrl.slice(0, 90) + '…');
-  const downloadId = await chrome.downloads.download({
+  return chrome.downloads.download({
     url: fileUrl,
     filename,
     conflictAction: 'uniquify',
     saveAs: false
   });
-  log('log', 'chrome.downloads id', downloadId);
-  return downloadId;
-}
-
-/**
- * Сохранение через chrome.downloads в Service Worker (data URL).
- * @param {ArrayBuffer} buffer
- * @param {string} filename
- * @param {string} mime
- */
-async function saveDownloadBuffer(buffer, filename, mime) {
-  log('log', 'сохранение (SW)', filename, Math.round(buffer.byteLength / 1024) + ' KB');
-  const b64 = await arrayBufferToBase64(buffer);
-  const dataUrl = `data:${mime || 'audio/mpeg'};base64,${b64}`;
-  const downloadId = await chrome.downloads.download({
-    url: dataUrl,
-    filename,
-    conflictAction: 'uniquify',
-    saveAs: false
-  });
-  log('log', 'chrome.downloads id', downloadId);
-  return downloadId;
 }
 
 async function notifyError(message) {
-  log('error', 'уведомление', message);
+  log('error', 'ошибка', message);
   try {
     await chrome.notifications.create({
       type: 'basic',
@@ -693,21 +730,14 @@ async function notifyError(message) {
  * @param {string|null} token
  */
 async function resolveToken(token) {
-  if (token) {
-    log('log', 'токен из сообщения');
-    return token.replace(/^OAuth\s+/i, '').trim();
-  }
+  if (token) return token.replace(/^OAuth\s+/i, '').trim();
   const data = await chrome.storage.local.get('oauthToken');
-  if (data.oauthToken) {
-    log('log', 'токен из storage');
-    return String(data.oauthToken).replace(/^OAuth\s+/i, '').trim();
-  }
-  log('warn', 'OAuth токен отсутствует');
+  if (data.oauthToken) return String(data.oauthToken).replace(/^OAuth\s+/i, '').trim();
   return null;
 }
 
-async function downloadTrack({ trackId, title, artist, coverUrl, token }) {
-  log('info', '═══ скачивание начато ═══', { trackId, title, artist, coverUrl: coverUrl?.slice(0, 60) });
+async function downloadTrack({ trackId, title, artist, coverUrl, coverB64, token }) {
+  log('info', 'скачивание', trackId, title);
 
   const oauth = await resolveToken(token);
   if (!oauth) {
@@ -731,12 +761,6 @@ async function downloadTrack({ trackId, title, artist, coverUrl, token }) {
     track = Array.isArray(trackMeta) ? trackMeta[0] : trackMeta;
     resolvedTitle = track?.title || title;
     resolvedArtist = track?.artists?.map((a) => a.name).join(', ') || artist;
-    log('log', 'метаданные', {
-      title: resolvedTitle,
-      available: track?.available,
-      availableForPremiumUsers: track?.availableForPremiumUsers
-    });
-
     if (track && track.available === false) {
       throw new Error(
         `Трек «${resolvedTitle}» недоступен для скачивания (available=false). Попробуйте другой трек или проверьте подписку Плюс.`
@@ -749,54 +773,55 @@ async function downloadTrack({ trackId, title, artist, coverUrl, token }) {
 
   const { url, codec } = await resolveTrackUrl(trackId, oauth);
   const baseName = sanitizeFilename(`${resolvedArtist} - ${resolvedTitle}`);
-  const isMp3 =
+  const filename = `YandexMusic/${baseName}.mp3`;
+  const albumTitle = track?.albums?.[0]?.title || '';
+  const id3Meta = { title: resolvedTitle, artist: resolvedArtist, album: albumTitle };
+  const coverBuffer = await resolveCoverBuffer(coverUrl, coverB64, track);
+  if (coverBuffer) log('info', 'скачивание обложки', trackId);
+
+  const isMp3Stream =
     codec === 'mp3' || /\/get-mp3\//i.test(url) || /\.mp3(\?|$)/i.test(url);
 
-  if (isMp3) {
-    const filename = `YandexMusic/${baseName}.mp3`;
+  if (isMp3Stream && !coverBuffer) {
     await downloadDirectUrl(url, filename);
-    log('info', '═══ трек скачан (прямой URL) ═══', filename);
+    log('info', 'готово', filename);
     return { ok: true, filename };
   }
 
-  log('log', 'не MP3 — загрузка и конвертация', codec);
-  const { buffer, mime } = await fetchAudioBuffer(url);
-  const inputExt = mime.includes('mpeg') ? 'mp3' : 'm4a';
-
-  let outBuffer = buffer;
-  let outExt = inputExt;
-  let outMime = mime;
-
-  if (inputExt !== 'mp3') {
-    try {
-      const coverBuffer = await fetchCoverFromPage(coverUrl);
-      const albumTitle = track?.albums?.[0]?.title || '';
-      const converted = await convertInOffscreen(
-        buffer,
-        inputExt,
-        { title: resolvedTitle, artist: resolvedArtist, album: albumTitle },
-        coverBuffer
-      );
-      outBuffer = converted.buffer;
-      outExt = 'mp3';
-      outMime = 'audio/mpeg';
-      log('log', 'конвертация OK', coverBuffer ? 'с обложкой' : 'без обложки');
-    } catch (e) {
-      log('warn', 'конвертация не удалась, исходный формат', e);
-      outExt = inputExt;
-    }
+  const { buffer } = await fetchAudioBuffer(url);
+  const payload = {
+    bufferB64: await arrayBufferToBase64(buffer),
+    meta: id3Meta
+  };
+  if (coverBuffer?.byteLength) {
+    payload.coverB64 = await arrayBufferToBase64(coverBuffer);
   }
 
-  const filename = `YandexMusic/${baseName}.${outExt}`;
-  await saveDownloadBuffer(outBuffer, filename, outMime);
-
-  log('info', '═══ трек скачан (buffer) ═══', filename);
-  return { ok: true, filename };
+  try {
+    let result;
+    if (isMp3Stream) {
+      log('info', 'теги MP3', trackId);
+      result = await callOffscreen('TAG_MP3', payload);
+    } else {
+      log('info', 'конвертация', trackId);
+      result = await callOffscreen('CONVERT_AND_TAG', payload);
+    }
+    await downloadBlobUrl(result.blobUrl, filename);
+    log('info', 'готово', filename);
+    return { ok: true, filename, hasCover: Boolean(coverBuffer) };
+  } catch (err) {
+    log('error', 'ошибка скачивания', err);
+    if (isMp3Stream) {
+      await downloadDirectUrl(url, filename);
+      log('info', 'готово', filename);
+      return { ok: true, filename, tagsSkipped: true };
+    }
+    throw err;
+  }
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'DOWNLOAD_TRACK') {
-    log('log', 'сообщение DOWNLOAD_TRACK', message.trackId);
     downloadTrack(message)
       .then((r) => sendResponse(r))
       .catch(async (err) => {

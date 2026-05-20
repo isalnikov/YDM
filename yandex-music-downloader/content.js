@@ -13,8 +13,14 @@
 
   /** @param {'log'|'warn'|'error'|'info'} level @param {string} action @param {...unknown} d */
   function log(level, action, ...d) {
+    const key =
+      /клик|скачивание|обложк|готово/i.test(action) || level === 'error' || level === 'warn';
+    if (!key) return;
     if (U?.LOG) U.LOG(level, action, ...d);
-    else console[level]('[YM-EXT]', action, ...d);
+    else {
+      const fn = level === 'info' ? console.info : console[level];
+      fn('[YM-EXT]', action, ...d);
+    }
   }
 
   function injectStyles() {
@@ -77,18 +83,125 @@
    * @param {Element} row
    * @returns {string|null}
    */
-  function extractCoverUrl(row) {
-    const imgSelectors = [
+  /**
+   * @param {HTMLImageElement} img
+   */
+  function pickImageUrl(img) {
+    if (!img) return null;
+    const srcset = img.getAttribute('srcset');
+    if (srcset) {
+      const candidates = srcset.split(',').map((part) => {
+        const trimmed = part.trim();
+        const lastSpace = trimmed.lastIndexOf(' ');
+        if (lastSpace > 0) {
+          const maybeDesc = trimmed.slice(lastSpace + 1).trim();
+          if (/^(\d+(\.\d+)?x|\d+w)$/.test(maybeDesc)) {
+            const url = trimmed.slice(0, lastSpace).trim();
+            let score = 100;
+            if (maybeDesc.endsWith('x')) score = parseFloat(maybeDesc) * 200;
+            else if (maybeDesc.endsWith('w')) score = parseInt(maybeDesc, 10);
+            return { url, score };
+          }
+        }
+        return { url: trimmed, score: 80 };
+      });
+      candidates.sort((a, b) => b.score - a.score);
+      if (candidates[0]?.url) return candidates[0].url;
+    }
+    const src = img.currentSrc || img.src;
+    return src && !src.startsWith('data:') ? src : null;
+  }
+
+  function normalizeCoverUrl(url) {
+    return U?.normalizeCoverUrl ? U.normalizeCoverUrl(url) : url;
+  }
+
+  /**
+   * @param {Element} root
+   * @returns {HTMLImageElement|null}
+   */
+  function findCoverImage(root) {
+    if (!root) return null;
+    const selectors = [
+      'img[class*="coverImage"]',
+      'img[class*="PlayButtonWithCover"]',
       '.d-track__cover img',
       '.d-track__img img',
       'img[class*="cover" i]',
+      'img[src*="get-music-content"]',
       'img[src*="avatars.yandex"]',
       'img[src*="avatars.mds"]'
     ];
-    for (const sel of imgSelectors) {
-      const img = row.querySelector(sel);
-      const src = img?.currentSrc || img?.src;
-      if (src && !src.startsWith('data:')) return src;
+    for (const sel of selectors) {
+      const img = root.querySelector(sel);
+      if (img) return img;
+    }
+    return null;
+  }
+
+  /**
+   * @param {HTMLButtonElement} btn
+   */
+  function findRowForButton(btn) {
+    const rowSelectors = [
+      '.d-track',
+      '[class*="TrackRow"]',
+      '[class*="TrackPlaylist"]',
+      '[class*="Track_root"]',
+      '[class*="Track_common"]',
+      '[class*="Track"]'
+    ];
+    for (const sel of rowSelectors) {
+      const row = btn.closest(sel);
+      if (row && findCoverImage(row)) return row;
+    }
+    let el = btn.parentElement;
+    for (let i = 0; i < 12 && el; i++) {
+      if (findCoverImage(el)) return el;
+      el = el.parentElement;
+    }
+    return btn.closest('.d-track') || btn.parentElement;
+  }
+
+  /**
+   * @param {ArrayBuffer} buffer
+   */
+  function arrayBufferToBase64(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    return btoa(binary);
+  }
+
+  /**
+   * @param {string|null} coverUrl
+   */
+  async function fetchCoverB64(coverUrl) {
+    const url = normalizeCoverUrl(coverUrl);
+    if (!url) return null;
+    try {
+      const res = await fetch(url);
+      if (!res.ok) return null;
+      const buf = await res.arrayBuffer();
+      if (buf.byteLength < 50) return null;
+      return arrayBufferToBase64(buf);
+    } catch (e) {
+      log('warn', 'обложка в content не загружена', e);
+      return null;
+    }
+  }
+
+  /**
+   * @param {Element} row
+   */
+  function extractCoverUrl(row) {
+    const img = findCoverImage(row);
+    if (img) {
+      const src = pickImageUrl(img);
+      if (src) return normalizeCoverUrl(src);
     }
 
     const playBtn =
@@ -97,15 +210,17 @@
       row.querySelector('[class*="PlayButton"]') ||
       row.querySelector('[aria-label*="слушать" i]');
     if (playBtn) {
-      const block = playBtn.closest('[class*="cover" i]') || playBtn.parentElement?.parentElement || row;
-      const img = block.querySelector('img[src]');
-      const src = img?.currentSrc || img?.src;
-      if (src && !src.startsWith('data:')) return src;
+      const block =
+        playBtn.closest('[class*="PlayButtonWithCover"]') ||
+        playBtn.closest('[class*="cover" i]') ||
+        playBtn.parentElement?.parentElement ||
+        row;
+      const nearImg = findCoverImage(block) || block.querySelector('img[src]');
+      const src = pickImageUrl(nearImg);
+      if (src) return normalizeCoverUrl(src);
     }
 
-    const any = row.querySelector('img[src*="avatar"], img[src*="covers"]');
-    const src = any?.currentSrc || any?.src;
-    return src && !src.startsWith('data:') ? src : null;
+    return null;
   }
 
   /**
@@ -190,10 +305,9 @@
   async function handleDownloadClick(btn, meta) {
     if (btn.dataset.status === 'downloading' || activeDownloads >= MAX_CONCURRENT) return;
 
-    log('log', 'клик «Скачать»', meta.trackId, meta.title);
+    log('info', 'клик «Скачать»', meta.trackId, meta.title);
 
     const token = await U.getAccessToken();
-    log('log', 'токен для запроса', token ? token.slice(0, 12) + '…' : '(НЕТ — нужен OAuth в popup)');
     if (!token) {
       setButtonState(btn, 'error', 'Нет токена');
       alert(
@@ -206,20 +320,25 @@
     setButtonState(btn, 'downloading', 'Загрузка...');
 
     try {
+      const row = findRowForButton(btn);
+      const coverUrl = extractCoverUrl(row) || meta.coverUrl;
+      const coverB64 = await fetchCoverB64(coverUrl);
+      if (coverB64) log('info', 'скачивание обложки', meta.trackId);
       const host = window.location.hostname;
       const response = await chrome.runtime.sendMessage({
         type: 'DOWNLOAD_TRACK',
         trackId: meta.trackId,
         title: meta.title,
         artist: meta.artist,
-        coverUrl: meta.coverUrl || null,
+        coverUrl: coverUrl || null,
+        coverB64: coverB64 || null,
         token: token || null,
         musicHost: host
       });
 
       if (response?.ok) {
         setButtonState(btn, 'done', '✓ Готово');
-        log('log', 'трек скачан', meta.trackId, response.filename);
+        log('info', 'готово', meta.trackId, response.filename);
         const { downloadedTracks = [] } = await chrome.storage.local.get('downloadedTracks');
         if (!downloadedTracks.includes(meta.trackId)) {
           downloadedTracks.push(meta.trackId);
