@@ -1,0 +1,75 @@
+{
+  "manifest_version": 3,
+  "name": "YM Playlist Downloader",
+  "version": "1.3.1",
+  "description": "Кнопки «Скачать» для треков на Яндекс.Музыке (личное использование)",
+  "permissions": [
+    "storage",
+    "downloads",
+    "scripting",
+    "offscreen",
+    "notifications",
+    "cookies"
+  ],
+  "host_permissions": [
+    "*://music.yandex.ru/*",
+    "*://music.yandex.by/*",
+    "*://music.yandex.kz/*",
+    "*://music.yandex.uz/*",
+    "*://api.music.yandex.net/*",
+    "*://*.strm.yandex.net/*",
+    "*://*.yandex.net/*",
+    "*://oauth.yandex.ru/*",
+    "*://strm.yandex.ru/*",
+    "*://*.strm.yandex.net/*",
+    "*://media.strm.yandex.net/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://music.yandex.ru/*",
+        "*://music.yandex.by/*",
+        "*://music.yandex.kz/*",
+        "*://music.yandex.uz/*"
+      ],
+      "js": ["page-bridge.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "*://music.yandex.ru/*",
+        "*://music.yandex.by/*",
+        "*://music.yandex.kz/*",
+        "*://music.yandex.uz/*"
+      ],
+      "js": ["utils.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["lib/*"],
+      "matches": ["*://music.yandex.ru/*", "*://music.yandex.by/*", "*://music.yandex.kz/*", "*://music.yandex.uz/*"]
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  }
+}
